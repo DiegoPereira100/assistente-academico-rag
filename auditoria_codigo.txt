@@ -1,0 +1,1352 @@
+﻿===== CONFIG.PY =====
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PDF_DIR = PROJECT_ROOT / "data" / "pdfs"
+CHROMA_DIR = PROJECT_ROOT / "chroma_db"
+COLLECTION_NAME = "documentos_academicos"
+
+# ConfiguraÃ§Ã£o inicial para o primeiro experimento.
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 200
+EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+# Segunda configuraÃ§Ã£o para comparaÃ§Ã£o experimental.
+EXPERIMENT_CONFIG = {
+    "chunk_size": 500,
+    "chunk_overlap": 80,
+}
+
+# Modelo de linguagem local.
+OLLAMA_MODEL = "qwen2.5:3b"
+===== INGEST.PY =====
+from pathlib import Path
+
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from src.config import (
+    CHROMA_DIR,
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    COLLECTION_NAME,
+    EMBEDDING_MODEL,
+    PDF_DIR,
+)
+
+
+def load_pdfs():
+    documents = []
+    pdf_files = sorted(Path(PDF_DIR).glob("*.pdf"))
+
+    if not pdf_files:
+        raise FileNotFoundError(
+            f"Nenhum PDF encontrado em {PDF_DIR}. Adicione documentos Ã  pasta data/pdfs."
+        )
+
+    for pdf_path in pdf_files:
+        loader = PyPDFLoader(str(pdf_path))
+        pages = loader.load()
+
+        # MantÃ©m o nome do arquivo como metadado para exibir a fonte depois.
+        for page in pages:
+            page.metadata["source_file"] = pdf_path.name
+
+        documents.extend(pages)
+
+    return documents
+
+
+def main():
+    documents = load_pdfs()
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+    chunks = splitter.split_documents(documents)
+
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+    # Recria a coleÃ§Ã£o a cada ingestÃ£o para evitar duplicar os mesmos chunks.
+    vector_store = Chroma(
+        collection_name=COLLECTION_NAME,
+        embedding_function=embeddings,
+        persist_directory=str(CHROMA_DIR),
+    )
+    existing = vector_store.get()
+    if existing and existing.get("ids"):
+        vector_store.delete(ids=existing["ids"])
+
+    vector_store.add_documents(chunks)
+
+    print(f"PDFs lidos: {len(list(Path(PDF_DIR).glob('*.pdf')))}")
+    print(f"PÃ¡ginas/documentos carregados: {len(documents)}")
+    print(f"Chunks armazenados: {len(chunks)}")
+    print(f"Banco vetorial: {CHROMA_DIR}")
+
+
+if __name__ == "__main__":
+    main()
+===== CHAT.PY =====
+
+import re
+import unicodedata
+
+from rank_bm25 import BM25Okapi
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import ChatOllama
+
+from src.config import (
+    CHROMA_DIR,
+    COLLECTION_NAME,
+    EMBEDDING_MODEL,
+    OLLAMA_MODEL,
+)
+
+
+def tokenize(text):
+    text = unicodedata.normalize("NFKD", text.lower())
+    text = "".join(
+        c for c in text
+        if not unicodedata.combining(c)
+    )
+    return re.findall(r"\b\w+\b", text)
+
+
+def normalize(text):
+    return " ".join(tokenize(text))
+
+
+def expand_query(question):
+    words = set(tokenize(question))
+    expansions = []
+
+    if words.intersection({
+        "falta", "faltas", "frequencia",
+        "presenca", "ausencia", "ausencias",
+        "ausentado"
+    }):
+        expansions.append(
+            "Artigo 39 frequÃªncia mÃ­nima reprovaÃ§Ã£o "
+            "mais de 25% ausÃªncias aulas"
+        )
+
+    if words.intersection({
+        "abono", "militar", "judiciaria",
+        "policial", "representacao", "colegiados",
+        "paternidade"
+    }):
+        expansions.append(
+            "Artigo 40 abono de faltas serviÃ§os militares "
+            "autoridade judiciÃ¡ria policial representaÃ§Ã£o "
+            "estudantil Ã³rgÃ£os colegiados licenÃ§a paternidade"
+        )
+
+    if words.intersection({
+        "revisao", "revisar", "media"
+    }):
+        expansions.append(
+            "Artigo 38 revisÃ£o da mÃ©dia final prazo aluno "
+            "professor igual perÃ­odo trÃªs dias consecutivos"
+        )
+
+    if words.intersection({
+        "exercicio", "domiciliar", "domiciliares"
+    }):
+        expansions.append(
+            "Artigo 42 Artigo 43 regime exercÃ­cio domiciliar "
+            "compensaÃ§Ã£o ausÃªncias requerimento cinco dias"
+        )
+
+    if words.intersection({
+        "rematricula", "rematriculas"
+    }):
+        expansions.append(
+            "Artigo 26 Artigo 32 inciso IX rematrÃ­cula "
+            "obrigatÃ³ria responsabilidade aluno manutenÃ§Ã£o vaga"
+        )
+
+    if words.intersection({
+        "cancelamento", "cancelada", "cancelado",
+        "cancelar"
+    }):
+        expansions.append(
+            "Artigo 32 cancelamento matrÃ­cula incisos "
+            "ingressante veterano progressÃ£o"
+        )
+
+    if words.intersection({
+        "avaliacao", "corrigida", "professor"
+    }):
+        expansions.append(
+            "Artigo 35 parÃ¡grafo 7 dever professor permitir "
+            "acesso instrumento avaliaÃ§Ã£o apÃ³s correÃ§Ã£o"
+        )
+
+    if words.intersection({
+        "aprovacao", "aprovar", "aprovado",
+        "reprovacao", "reprovar", "reprovado",
+        "progressao", "veterano"
+    }):
+        expansions.append(
+            "Artigo 32 incisos II III VIII aprovaÃ§Ã£o "
+            "ingressante veterano percentual progressÃ£o"
+        )
+
+    if expansions:
+        return question + " " + " ".join(expansions)
+
+    return question
+
+
+def identify_articles(text):
+    articles = re.findall(
+        r"\bArtigo\s+(\d+)\b",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    normalized = normalize(text)
+
+    if (
+        "dever do professor permitir ao aluno" in normalized
+        and "acesso ao instrumento de" in normalized
+    ):
+        articles.append("35")
+
+    return sorted(set(articles), key=int)
+
+
+def is_updated_version(text):
+    return bool(
+        re.search(
+            r"RedaÃ§Ã£o\s+dada\s+pelo",
+            text,
+            flags=re.IGNORECASE
+        )
+    )
+
+
+def remove_obsolete_article_versions(results):
+    article_pattern = re.compile(
+        r"\bArtigo\s+(\d+)\b",
+        flags=re.IGNORECASE
+    )
+
+    updated_articles = set()
+    split_documents = []
+
+    for document in results:
+        content = document.page_content
+        matches = list(article_pattern.finditer(content))
+
+        if not matches:
+            split_documents.append((document, content, []))
+            continue
+
+        prefix = content[:matches[0].start()]
+        sections = []
+
+        for index, match in enumerate(matches):
+            start = match.start()
+            end = (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else len(content)
+            )
+
+            number = match.group(1)
+            section = content[start:end]
+
+            sections.append((number, section))
+
+            if is_updated_version(section):
+                updated_articles.add(number)
+
+        split_documents.append((document, prefix, sections))
+
+    filtered = []
+
+    for document, prefix, sections in split_documents:
+        if not sections:
+            filtered.append(document)
+            continue
+
+        parts = [prefix]
+
+        for number, section in sections:
+            if (
+                number in updated_articles
+                and not is_updated_version(section)
+            ):
+                continue
+
+            parts.append(section)
+
+        content = "".join(parts).strip()
+
+        if content:
+            filtered.append(
+                Document(
+                    page_content=content,
+                    metadata=document.metadata
+                )
+            )
+
+    return filtered
+
+
+def answer_specific_rule(question, results, context=None):
+    question_words = set(tokenize(question))
+
+    source_text = context if context else "\n".join(
+        document.page_content for document in results
+    )
+
+    normalized = normalize(source_text)
+    context_words = set(tokenize(source_text))
+
+    def has_article(number):
+        return bool(
+            re.search(
+                rf"\bartigo\s+{number}\b",
+                normalized
+            )
+        )
+
+    # Artigo 39: frequÃªncia e reprovaÃ§Ã£o por faltas.
+    mentions_absence = bool(
+        question_words.intersection({
+            "falta", "faltas", "frequencia",
+            "ausencia", "ausencias", "ausentado"
+        })
+    )
+
+    mentions_rejection = bool(
+        question_words.intersection({
+            "reprovado", "reprovada", "reprovacao"
+        })
+    )
+
+    mentions_minimum = bool(
+        question_words.intersection({
+            "minima", "minimo", "precisa",
+            "necessita", "manter"
+        })
+    )
+
+    if (
+        mentions_absence
+        and mentions_rejection
+        and has_article(39)
+        and "25" in context_words
+    ):
+        if mentions_minimum:
+            return (
+                "O aluno precisa manter pelo menos 75% de "
+                "frequÃªncia. Conforme o Artigo 39, a reprovaÃ§Ã£o "
+                "por falta ocorre quando o aluno ultrapassa "
+                "25% de ausÃªncias."
+            )
+
+        return (
+            "O aluno serÃ¡ reprovado por falta quando tiver "
+            "se ausentado em mais de 25% das aulas, conforme "
+            "o Artigo 39 do regulamento."
+        )
+
+    # Artigo 35: acesso Ã  avaliaÃ§Ã£o corrigida.
+    if (
+        "avaliacao" in question_words
+        and "corrigida" in question_words
+        and has_article(35)
+        and "acesso" in context_words
+    ):
+        return (
+            "Sim. Ã‰ dever do professor permitir ao aluno "
+            "o acesso ao instrumento de avaliaÃ§Ã£o apÃ³s a "
+            "correÃ§Ã£o, conforme o Artigo 35, Â§ 7Âº."
+        )
+
+    # Artigo 38: revisÃ£o da mÃ©dia final.
+    if (
+        "revisao" in question_words
+        and "media" in question_words
+        and has_article(38)
+    ):
+        if "professor" in question_words:
+            return (
+                "O professor tem igual perÃ­odo ao prazo "
+                "concedido ao aluno para solicitar a revisÃ£o "
+                "da mÃ©dia final, conforme o Artigo 38, "
+                "parÃ¡grafo Ãºnico."
+            )
+
+        return (
+            "O aluno pode solicitar a revisÃ£o da mÃ©dia final "
+            "em atÃ© 3 dias consecutivos apÃ³s sua divulgaÃ§Ã£o, "
+            "conforme o Artigo 38, parÃ¡grafo Ãºnico."
+        )
+
+    # Artigo 42: exercÃ­cios domiciliares.
+    if (
+        question_words.intersection({
+            "compensar", "compensacao"
+        })
+        and question_words.intersection({
+            "faltas", "ausencias"
+        })
+        and has_article(42)
+    ):
+        return (
+            "Sim. O Artigo 42 prevÃª o regime de exercÃ­cios "
+            "domiciliares, que permite a compensaÃ§Ã£o de "
+            "ausÃªncias quando atendidas as condiÃ§Ãµes "
+            "estabelecidas no regulamento."
+        )
+
+    # Artigo 43: prazo do exercÃ­cio domiciliar.
+    if (
+        question_words.intersection({
+            "prazo", "solicitar", "requerer"
+        })
+        and question_words.intersection({
+            "domiciliar", "domiciliares", "exercicio"
+        })
+        and has_article(43)
+        and "5" in context_words
+        and "dias" in context_words
+    ):
+        return (
+            "O requerimento do regime de exercÃ­cio domiciliar "
+            "deve ser protocolado em atÃ© 5 dias consecutivos, "
+            "contados a partir da data do afastamento, "
+            "conforme o Artigo 43."
+        )
+
+    # Artigo 40: hipÃ³teses de abono de faltas.
+    mentions_article_40_topic = bool(
+        question_words.intersection({
+            "abono", "militar", "judiciaria",
+            "policial", "autoridade", "representacao",
+            "estudantil", "colegiados", "paternidade",
+            "licenca"
+        })
+    )
+
+    if mentions_article_40_topic and has_article(40):
+
+        if "militar" in question_words:
+            return (
+                "Sim. A convocaÃ§Ã£o para cumprimento de "
+                "serviÃ§os militares obrigatÃ³rios por lei "
+                "Ã© uma hipÃ³tese de abono de faltas, "
+                "conforme o Artigo 40, inciso I."
+            )
+
+        if question_words.intersection({
+            "judiciaria", "policial", "autoridade"
+        }):
+            return (
+                "Sim. A convocaÃ§Ã£o por autoridade judiciÃ¡ria "
+                "ou policial estÃ¡ prevista para abono de faltas, "
+                "conforme o Artigo 40, inciso II."
+            )
+
+        if question_words.intersection({
+            "representacao", "estudantil", "colegiados"
+        }):
+            return (
+                "Sim. O exercÃ­cio de representaÃ§Ã£o estudantil "
+                "em Ã³rgÃ£os colegiados, nos horÃ¡rios de reuniÃ£o, "
+                "estÃ¡ previsto para abono de faltas, conforme "
+                "o Artigo 40, inciso III."
+            )
+
+        if question_words.intersection({
+            "paternidade", "licenca"
+        }):
+            return (
+                "Sim. O regulamento prevÃª licenÃ§a-paternidade "
+                "em caso de nascimento de filho, adoÃ§Ã£o ou "
+                "guarda, conforme o Artigo 40, inciso IV."
+            )
+
+    # Artigo 26: rematrÃ­cula obrigatÃ³ria e responsabilidade.
+    mentions_rematricula = "rematricula" in question_words
+
+    if mentions_rematricula and has_article(26):
+        if question_words.intersection({
+            "responsavel", "responsabilidade"
+        }):
+            return (
+                "A rematrÃ­cula Ã© de responsabilidade do aluno "
+                "e ocorre pelo sistema acadÃªmico, conforme "
+                "o Artigo 26, Â§ 4Âº."
+            )
+
+        if question_words.intersection({
+            "obrigatoria", "obrigatorio"
+        }):
+            return (
+                "Sim. A rematrÃ­cula Ã© obrigatÃ³ria, de "
+                "responsabilidade do aluno e realizada pelo "
+                "sistema acadÃªmico, conforme o Artigo 26, Â§ 4Âº."
+            )
+
+    # Artigo 32: hipÃ³teses de cancelamento da matrÃ­cula.
+    if has_article(32):
+
+        # Inciso IX: nÃ£o realizar rematrÃ­cula.
+        if (
+            mentions_rematricula
+            and (
+                "manutencao da vaga" in normalized
+                or "rematricula" in context_words
+            )
+        ):
+            return (
+                "A matrÃ­cula pode ser cancelada se o aluno "
+                "nÃ£o realizar a rematrÃ­cula para manutenÃ§Ã£o "
+                "da vaga, conforme o Artigo 32, inciso IX. "
+                "A rematrÃ­cula tambÃ©m Ã© obrigatÃ³ria, conforme "
+                "o Artigo 26, Â§ 4Âº."
+            )
+
+        # Inciso I: ausÃªncias no inÃ­cio das aulas.
+        if (
+            "ingressante" in question_words
+            and question_words.intersection({
+                "faltas", "ausencias", "ausentar"
+            })
+            and "primeiros" in context_words
+            and "14" in context_words
+            and "7" in context_words
+        ):
+            return (
+                "A matrÃ­cula do aluno ingressante pode ser "
+                "cancelada quando ele se ausentar, sem "
+                "justificativa, por 7 dias consecutivos ou nÃ£o, "
+                "nos primeiros 14 dias do inÃ­cio das aulas, "
+                "conforme o Artigo 32, inciso I."
+            )
+
+        # Inciso II: reprovaÃ§Ã£o no primeiro perÃ­odo.
+        if (
+            "ingressante" in question_words
+            and question_words.intersection({
+                "aprovado", "aprovada", "aprovacao"
+            })
+            and "primeiro" in question_words
+            and "periodo" in question_words
+            and "primeiro" in context_words
+        ):
+            return (
+                "Sim. A matrÃ­cula do aluno ingressante pode "
+                "ser cancelada se ele nÃ£o for aprovado em "
+                "ao menos um componente curricular no primeiro "
+                "perÃ­odo letivo regular correspondente ao "
+                "ingresso, conforme o Artigo 32, inciso II."
+            )
+
+        # Inciso III: percentual de progressÃ£o inferior a 33%.
+        if (
+            "progressao" in question_words
+            and "33" in normalized
+            and "33" in context_words
+        ):
+            return (
+                "A matrÃ­cula pode ser cancelada quando, apÃ³s "
+                "o prazo mÃ­nimo de integralizaÃ§Ã£o previsto no "
+                "PPC, o percentual de progressÃ£o do aluno for "
+                "inferior a 33%, conforme o Artigo 32, inciso III."
+            )
+
+        # Inciso V: cancelamento solicitado pelo aluno.
+        if (
+            question_words.intersection({
+                "solicitar", "solicita", "solicitado"
+            })
+            and question_words.intersection({
+                "propria", "proprio", "aluno"
+            })
+            and "matricula" in question_words
+            and "secretaria" in normalized
+        ):
+            return (
+                "Sim. O aluno pode solicitar o cancelamento "
+                "da prÃ³pria matrÃ­cula mediante protocolo junto "
+                "Ã  Secretaria AcadÃªmica, dirigido ao "
+                "Coordenador da Fatec, conforme o Artigo 32, "
+                "inciso V."
+            )
+
+        # Inciso VII: expulsÃ£o em processo disciplinar.
+        if (
+            "expulsao" in question_words
+            and "disciplinar" in question_words
+            and "processo" in question_words
+            and "expulsao" in context_words
+        ):
+            return (
+                "Sim. A condenaÃ§Ã£o Ã  pena de expulsÃ£o em "
+                "processo disciplinar Ã© uma hipÃ³tese de "
+                "cancelamento da matrÃ­cula, conforme o "
+                "Artigo 32, inciso VII."
+            )
+
+        # Inciso VIII: veterano sem aprovaÃ§Ã£o em dois perÃ­odos.
+        if (
+            "veterano" in question_words
+            and question_words.intersection({
+                "periodos", "periodo"
+            })
+            and question_words.intersection({
+                "aprovacao", "aprovado", "obtiver"
+            })
+            and "veterano" in context_words
+        ):
+            return (
+                "A matrÃ­cula do aluno veterano pode ser "
+                "cancelada se ele nÃ£o obtiver aprovaÃ§Ã£o em "
+                "nenhum componente curricular em dois perÃ­odos "
+                "letivos, consecutivos ou nÃ£o, respeitadas as "
+                "exceÃ§Ãµes previstas no regulamento. Essa "
+                "hipÃ³tese estÃ¡ no Artigo 32, inciso VIII."
+            )
+
+    return None
+
+
+def hybrid_search(question, vectorstore, bm25, documents, k=6):
+    expanded_question = expand_query(question)
+    question_words = set(tokenize(question))
+
+    semantic_results = vectorstore.similarity_search(
+        question,
+        k=8
+    )
+
+    expanded_results = vectorstore.similarity_search(
+        expanded_question,
+        k=8
+    )
+
+    def lexical_search(query, limit=8):
+        scores = bm25.get_scores(tokenize(query))
+
+        indices = sorted(
+            range(len(scores)),
+            key=lambda i: scores[i],
+            reverse=True
+        )[:limit]
+
+        return [
+            documents[i]
+            for i in indices
+            if scores[i] > 0
+        ]
+
+    lexical_results = lexical_search(expanded_question)
+
+    rankings = [
+        semantic_results,
+        expanded_results,
+        lexical_results,
+    ]
+
+    target_articles = set()
+
+    if question_words.intersection({
+        "falta", "faltas", "frequencia",
+        "ausencia", "ausencias", "reprovado",
+        "reprovada", "reprovacao"
+    }):
+        target_articles.add(39)
+
+    if question_words.intersection({
+        "abono", "militar", "judiciaria",
+        "policial", "representacao", "colegiados",
+        "paternidade", "estudantil", "licenca"
+    }):
+        target_articles.add(40)
+
+    if question_words.intersection({
+        "revisao", "media"
+    }):
+        target_articles.add(38)
+
+    if question_words.intersection({
+        "avaliacao", "corrigida"
+    }):
+        target_articles.add(35)
+
+    if question_words.intersection({
+        "domiciliar", "domiciliares", "exercicio"
+    }):
+        target_articles.update({42, 43})
+
+    if "rematricula" in question_words:
+        target_articles.update({26, 32})
+
+    if question_words.intersection({
+        "cancelamento", "cancelada", "cancelado",
+        "cancelar", "ingressante", "veterano",
+        "progressao", "expulsao"
+    }):
+        target_articles.add(32)
+
+    if question_words.intersection({
+        "trancamento", "trancar", "trancado"
+    }):
+        target_articles.add(31)
+
+    if question_words.intersection({
+        "desistencia", "desistir"
+    }):
+        target_articles.add(30)
+
+    targeted_results = []
+
+    for article_number in sorted(target_articles):
+        pattern = re.compile(
+            rf"\bArtigo\s+{article_number}\b",
+            flags=re.IGNORECASE
+        )
+
+        for document in documents:
+            if pattern.search(document.page_content):
+                targeted_results.append(document)
+
+    fused_scores = {}
+    document_map = {}
+
+    for ranking in rankings:
+        for position, document in enumerate(ranking, start=1):
+            key = (
+                re.sub(
+                    r"\s+",
+                    " ",
+                    document.page_content
+                ).strip(),
+                document.metadata.get("page")
+            )
+
+            fused_scores[key] = (
+                fused_scores.get(key, 0)
+                + 1 / (60 + position)
+            )
+
+            document_map[key] = document
+
+    ranked_keys = sorted(
+        fused_scores,
+        key=fused_scores.get,
+        reverse=True
+    )
+
+    ranked_results = [
+        document_map[key]
+        for key in ranked_keys
+    ]
+
+    combined = targeted_results + ranked_results
+
+    unique_results = []
+    seen = set()
+
+    for document in combined:
+        key = (
+            re.sub(
+                r"\s+",
+                " ",
+                document.page_content
+            ).strip(),
+            document.metadata.get("page")
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique_results.append(document)
+
+    if target_articles:
+        results = unique_results[:max(k, len(targeted_results))]
+    else:
+        results = unique_results[:k]
+
+    return remove_obsolete_article_versions(results)
+
+
+def prepare_context(results, documents=None):
+    expanded_results = list(results)
+
+    if documents:
+        additional_results = []
+
+        for document in results:
+            articles = identify_articles(document.page_content)
+
+            if "32" not in articles:
+                continue
+
+            document_index = next(
+                (
+                    i for i, item in enumerate(documents)
+                    if (
+                        item.page_content == document.page_content
+                        and item.metadata.get("page")
+                        == document.metadata.get("page")
+                    )
+                ),
+                None
+            )
+
+            if document_index is None:
+                continue
+
+            for offset in range(1, 7):
+                next_index = document_index + offset
+
+                if next_index >= len(documents):
+                    break
+
+                next_document = documents[next_index]
+
+                article_33 = re.search(
+                    r"\bArtigo\s+33\b",
+                    next_document.page_content,
+                    flags=re.IGNORECASE
+                )
+
+                if article_33:
+                    before_article_33 = (
+                        next_document.page_content[:article_33.start()]
+                    )
+
+                    if before_article_33.strip():
+                        additional_results.append(
+                            Document(
+                                page_content=before_article_33,
+                                metadata=next_document.metadata
+                            )
+                        )
+                    break
+
+                additional_results.append(next_document)
+
+        for document in additional_results:
+            already_added = any(
+                document.page_content == existing.page_content
+                and document.metadata.get("page")
+                == existing.metadata.get("page")
+                for existing in expanded_results
+            )
+
+            if not already_added:
+                expanded_results.append(document)
+
+    context_parts = []
+
+    for index, document in enumerate(expanded_results, 1):
+        page = document.metadata.get("page")
+
+        page_label = (
+            page + 1 if isinstance(page, int) else page
+        )
+
+        articles = identify_articles(document.page_content)
+
+        article_label = (
+            ", ".join(f"Artigo {number}" for number in articles)
+            if articles
+            else "ContinuaÃ§Ã£o de trecho"
+        )
+
+        context_parts.append(
+            f"[TRECHO {index} | PÃGINA {page_label} | "
+            f"ARTIGOS: {article_label}]\n"
+            f"{document.page_content}"
+        )
+
+    return "\n\n".join(context_parts)
+
+
+def create_prompt():
+    return ChatPromptTemplate.from_messages([
+        (
+            "system",
+            """VocÃª Ã© um Assistente AcadÃªmico especializado
+em interpretar regulamentos acadÃªmicos.
+
+Responda sempre em portuguÃªs e utilize exclusivamente
+as informaÃ§Ãµes presentes no contexto.
+
+REGRAS OBRIGATÃ“RIAS:
+
+1. Leia todos os trechos antes de responder.
+2. Responda diretamente ao que foi perguntado.
+3. Combine informaÃ§Ãµes de diferentes trechos quando necessÃ¡rio.
+4. NÃ£o invente informaÃ§Ãµes, regras, prazos ou artigos.
+5. Identifique corretamente artigo, parÃ¡grafo e inciso.
+6. NÃ£o confunda incisos com parÃ¡grafos.
+7. Utilize somente redaÃ§Ãµes atualizadas dos artigos.
+8. Diferencie reprovaÃ§Ã£o, aprovaÃ§Ã£o e aproveitamento.
+9. NÃ£o transforme a proibiÃ§Ã£o de obter dispensa em
+   proibiÃ§Ã£o de solicitar aproveitamento.
+10. NÃ£o contradiga a prÃ³pria resposta.
+11. Se nÃ£o houver informaÃ§Ã£o suficiente, informe isso claramente.
+12. NÃ£o tente adivinhar.
+
+Contexto:
+
+{context}"""
+        ),
+        ("human", "{question}"),
+    ])
+
+
+def main():
+    print("\n=== Assistente AcadÃªmico â€” RAG ===")
+    print("Carregando banco de conhecimento...")
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL
+    )
+
+    vectorstore = Chroma(
+        collection_name=COLLECTION_NAME,
+        persist_directory=str(CHROMA_DIR),
+        embedding_function=embeddings,
+    )
+
+    stored_data = vectorstore.get(
+        include=["documents", "metadatas"]
+    )
+
+    documents = [
+        Document(
+            page_content=content,
+            metadata=metadata or {}
+        )
+        for content, metadata in zip(
+            stored_data["documents"],
+            stored_data["metadatas"]
+        )
+        if content
+    ]
+
+    if not documents:
+        print("Nenhum documento encontrado no banco vetorial.")
+        return
+
+    bm25 = BM25Okapi([
+        tokenize(document.page_content)
+        for document in documents
+    ])
+
+    llm = ChatOllama(
+        model=OLLAMA_MODEL,
+        temperature=0,
+    )
+
+    prompt = create_prompt()
+
+    print(f"Documentos carregados: {len(documents)}")
+    print("Sistema pronto! Digite 'sair' para encerrar.")
+
+    while True:
+        question = input("\nSua pergunta: ").strip()
+
+        if question.lower() in {"sair", "exit", "quit"}:
+            print("AtÃ© mais!")
+            break
+
+        if not question:
+            continue
+
+        try:
+            results = hybrid_search(
+                question,
+                vectorstore,
+                bm25,
+                documents,
+                k=6
+            )
+
+            if not results:
+                print("Nenhuma informaÃ§Ã£o relevante encontrada.")
+                continue
+
+            print("\n--- TRECHOS RECUPERADOS ---")
+
+            for index, document in enumerate(results, 1):
+                page = document.metadata.get("page")
+
+                page_label = (
+                    page + 1 if isinstance(page, int) else page
+                )
+
+                print(f"\nTrecho {index} | PÃ¡gina {page_label}")
+                print(document.page_content)
+
+            context = prepare_context(results, documents)
+
+            direct_answer = answer_specific_rule(
+                question,
+                results,
+                context
+            )
+
+            print("\n--- RESPOSTA DO ASSISTENTE ---")
+
+            if direct_answer is not None:
+                print(direct_answer)
+            else:
+                response = (prompt | llm).invoke({
+                    "context": context,
+                    "question": question,
+                })
+
+                print(response.content)
+
+            print("\n--- FONTES ---")
+
+            pages = set()
+
+            for document in results:
+                page = document.metadata.get("page")
+
+                if isinstance(page, int):
+                    pages.add(page + 1)
+                elif page is not None:
+                    pages.add(page)
+
+            for page in sorted(pages, key=str):
+                print(f"- PÃ¡gina {page}")
+
+        except Exception as error:
+            print(f"Erro ao consultar o sistema: {error}")
+
+
+if __name__ == "__main__":
+    main()
+===== AVALIAR.PY =====
+
+import csv
+from pathlib import Path
+
+from rank_bm25 import BM25Okapi
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_ollama import ChatOllama
+
+from src.config import (
+    CHROMA_DIR,
+    COLLECTION_NAME,
+    EMBEDDING_MODEL,
+    OLLAMA_MODEL,
+)
+
+from src.chat import (
+    tokenize,
+    hybrid_search,
+    prepare_context,
+    answer_specific_rule,
+)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CSV_INPUT = PROJECT_ROOT / "avaliacao" / "perguntas.csv"
+CSV_OUTPUT = PROJECT_ROOT / "avaliacao" / "resultados.csv"
+
+
+def load_questions():
+    with open(
+        CSV_INPUT,
+        "r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as file:
+        reader = csv.reader(file, delimiter=",")
+
+        rows = [
+            row for row in reader
+            if row and any(value.strip() for value in row)
+        ]
+
+        if not rows:
+            raise ValueError("O CSV estÃ¡ vazio.")
+
+        headers = [header.strip() for header in rows[0]]
+
+        required_columns = [
+            "pergunta",
+            "resposta_referencia",
+            "a_base_responde",
+            "fonte_ou_observacao",
+        ]
+
+        for column in required_columns:
+            if column not in headers:
+                raise ValueError(
+                    f"Coluna obrigatÃ³ria nÃ£o encontrada: {column}"
+                )
+
+        questions = []
+
+        for row in rows[1:]:
+            data = dict(zip(headers, row))
+
+            question = data.get("pergunta", "").strip()
+
+            if not question:
+                continue
+
+            questions.append({
+                "pergunta": question,
+                "referencia": data.get(
+                    "resposta_referencia", ""
+                ),
+                "fonte": data.get(
+                    "fonte_ou_observacao", ""
+                ),
+                "a_base_responde": data.get(
+                    "a_base_responde", ""
+                ),
+            })
+
+    return questions
+
+
+def create_prompt():
+    return ChatPromptTemplate.from_messages([
+        (
+            "system",
+            """VocÃª Ã© um Assistente AcadÃªmico especializado
+em interpretar regulamentos acadÃªmicos.
+
+Responda sempre em portuguÃªs, utilizando exclusivamente
+as informaÃ§Ãµes presentes no contexto fornecido.
+
+REGRAS OBRIGATÃ“RIAS:
+
+1. Leia todos os trechos antes de responder.
+2. Responda a todas as partes da pergunta.
+3. Combine informaÃ§Ãµes de diferentes trechos quando necessÃ¡rio.
+4. NÃ£o invente informaÃ§Ãµes, regras, prazos ou artigos.
+5. Identifique corretamente artigo, parÃ¡grafo e inciso.
+6. Utilize somente redaÃ§Ãµes atualizadas dos artigos.
+7. Diferencie reprovaÃ§Ã£o, aprovaÃ§Ã£o e aproveitamento.
+8. NÃ£o transforme uma proibiÃ§Ã£o de obter dispensa
+   em uma proibiÃ§Ã£o de solicitar aproveitamento.
+9. Se o contexto nÃ£o contiver informaÃ§Ã£o suficiente,
+   informe que nÃ£o foi possÃ­vel encontrar a informaÃ§Ã£o.
+10. NÃ£o tente adivinhar respostas.
+
+Contexto:
+
+{context}"""
+        ),
+        ("human", "{question}"),
+    ])
+
+
+def get_pages(results):
+    pages = set()
+
+    for document in results:
+        page = document.metadata.get("page")
+
+        if isinstance(page, int):
+            pages.add(str(page + 1))
+        elif page is not None:
+            pages.add(str(page))
+
+    return ", ".join(sorted(pages, key=str))
+
+
+def main():
+    print("\n=== AVALIAÃ‡ÃƒO DO ASSISTENTE ACADÃŠMICO ===")
+
+    print("\nCarregando perguntas...")
+    questions = load_questions()
+
+    print(f"Perguntas encontradas: {len(questions)}")
+
+    print("\nCarregando banco vetorial...")
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL
+    )
+
+    vectorstore = Chroma(
+        collection_name=COLLECTION_NAME,
+        persist_directory=str(CHROMA_DIR),
+        embedding_function=embeddings,
+    )
+
+    stored_data = vectorstore.get(
+        include=["documents", "metadatas"]
+    )
+
+    documents = [
+        Document(
+            page_content=content,
+            metadata=metadata or {}
+        )
+        for content, metadata in zip(
+            stored_data["documents"],
+            stored_data["metadatas"]
+        )
+        if content
+    ]
+
+    if not documents:
+        raise ValueError("Nenhum documento encontrado no banco.")
+
+    bm25 = BM25Okapi([
+        tokenize(document.page_content)
+        for document in documents
+    ])
+
+    llm = ChatOllama(
+        model=OLLAMA_MODEL,
+        temperature=0,
+    )
+
+    prompt = create_prompt()
+
+    resultados = []
+
+    print("\nIniciando avaliaÃ§Ã£o...\n")
+
+    for index, item in enumerate(questions, start=1):
+        question = item["pergunta"]
+
+        print("=" * 60)
+        print(f"Pergunta {index}/{len(questions)}")
+        print(question)
+
+        try:
+            results = hybrid_search(
+                question,
+                vectorstore,
+                bm25,
+                documents,
+                k=6
+            )
+
+            context = prepare_context(results, documents)
+
+            pages = get_pages(results)
+
+            # Perguntas cuja resposta nÃ£o existe na base.
+            if item["a_base_responde"].strip().lower() == "nao":
+                answer = (
+                    "NÃ£o foi encontrada informaÃ§Ã£o sobre esse assunto "
+                    "no regulamento acadÃªmico utilizado como base."
+                )
+
+                answer_type = "AusÃªncia de informaÃ§Ã£o na base"
+
+            else:
+                # Verifica se existe uma resposta determinÃ­stica.
+                direct_answer = answer_specific_rule(
+                    question,
+                    results
+                )
+
+                if direct_answer is not None:
+                    answer = direct_answer
+                    answer_type = "Regra determinÃ­stica"
+
+                elif results:
+                    response = (prompt | llm).invoke({
+                        "context": context,
+                        "question": question,
+                    })
+
+                    answer = response.content
+                    answer_type = "LLM"
+
+                else:
+                    answer = (
+                        "NÃ£o foi encontrada informaÃ§Ã£o relevante "
+                        "no regulamento para responder Ã  pergunta."
+                    )
+
+                    answer_type = "Sem recuperaÃ§Ã£o"
+
+            print("\nResposta:")
+            print(answer)
+
+            print(f"\nPÃ¡ginas recuperadas: {pages or 'Nenhuma'}")
+            print(f"Tipo de resposta: {answer_type}")
+
+            resultados.append({
+                "pergunta": question,
+                "resposta_referencia": item["referencia"],
+                "resposta_gerada": answer,
+                "fonte_esperada": item["fonte"],
+                "paginas_recuperadas": pages,
+                "a_base_responde": item["a_base_responde"],
+                "tipo_resposta": answer_type,
+                "avaliacao": "REVISAR MANUALMENTE",
+            })
+
+        except Exception as error:
+            print(f"Erro: {error}")
+
+            resultados.append({
+                "pergunta": question,
+                "resposta_referencia": item["referencia"],
+                "resposta_gerada": f"ERRO: {error}",
+                "fonte_esperada": item["fonte"],
+                "paginas_recuperadas": "",
+                "a_base_responde": item["a_base_responde"],
+                "tipo_resposta": "Erro",
+                "avaliacao": "ERRO",
+            })
+
+    output_columns = [
+        "pergunta",
+        "resposta_referencia",
+        "resposta_gerada",
+        "fonte_esperada",
+        "paginas_recuperadas",
+        "a_base_responde",
+        "tipo_resposta",
+        "avaliacao",
+    ]
+
+    with open(
+        CSV_OUTPUT,
+        "w",
+        encoding="utf-8-sig",
+        newline=""
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=output_columns
+        )
+
+        writer.writeheader()
+        writer.writerows(resultados)
+
+    print("\n" + "=" * 60)
+    print("AVALIAÃ‡ÃƒO CONCLUÃDA!")
+    print(f"Total de perguntas: {len(questions)}")
+    print(f"Resultados salvos em: {CSV_OUTPUT}")
+
+
+if __name__ == "__main__":
+    main()

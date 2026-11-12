@@ -1,0 +1,175 @@
+﻿===== ESTRUTURA DO PROJETO =====
+.env.example
+.gitignore
+auditoria_codigo.txt
+README.md
+requirements.txt
+avaliacao\avaliar.py
+avaliacao\perguntas.csv
+avaliacao\resultados.csv
+data\pdfs\COLOQUE_OS_PDFS_AQUI.txt
+data\pdfs\regulamento_geral_fatecs.pdf
+src\chat.py
+src\config.py
+src\ingest.py
+src\__init__.py
+===== README =====
+# Assistente Acadêmico — Sistema RAG com LangChain
+
+Projeto acadêmico desenvolvido para a disciplina de **Processamento de Linguagem Natural (PLN)**.
+
+## 1. Objetivo
+
+Desenvolver um assistente acadêmico capaz de responder perguntas sobre regulamentos e documentos institucionais utilizando a arquitetura RAG (*Retrieval-Augmented Generation*).
+
+O sistema consulta os documentos inseridos na base de conhecimento, recupera os trechos relevantes e utiliza um modelo de linguagem para elaborar respostas fundamentadas nas informações encontradas.
+
+Quando não houver evidências suficientes nos documentos, o sistema deve informar que não encontrou informações para responder à pergunta.
+
+## 2. Tecnologias utilizadas
+
+- **Python 3.12:** linguagem principal.
+- **LangChain:** integração e organização do fluxo RAG.
+- **ChromaDB:** armazenamento vetorial.
+- **HuggingFace Sentence Transformers:** geração de embeddings.
+- **BM25:** recuperação lexical de documentos.
+- **Ollama:** execução local do modelo de linguagem.
+- **Qwen2.5:3b:** modelo utilizado para geração das respostas.
+
+## 3. Funcionamento do sistema
+
+O projeto utiliza as seguintes etapas:
+
+1. **Ingestão:** leitura dos documentos PDF.
+2. **Pré-processamento:** preparação e organização dos textos extraídos.
+3. **Divisão em chunks:** fragmentação dos documentos em trechos menores.
+4. **Embeddings:** transformação dos textos em representações vetoriais.
+5. **Armazenamento:** persistência dos vetores no ChromaDB.
+6. **Recuperação:** busca híbrida, combinando similaridade semântica e BM25.
+7. **Geração:** envio dos trechos recuperados ao modelo Qwen2.5:3b por meio do LangChain.
+8. **Resposta:** apresentação da resposta e das páginas utilizadas como fontes.
+
+O sistema também possui regras específicas para responder a determinadas perguntas diretamente com base nos artigos recuperados do regulamento.
+
+## 4. Estrutura do projeto
+
+```text
+assistente_academico_rag/
+├── data/
+│   └── pdfs/              # Documentos PDF utilizados
+├── avaliacao/
+│   └── perguntas.csv      # Conjunto de perguntas de avaliação
+├── chroma_db/             # Banco vetorial persistido
+├── src/
+│   ├── config.py          # Configurações do projeto
+│   ├── ingest.py          # Ingestão e indexação dos documentos
+│   └── chat.py            # Busca e geração de respostas
+├── .env.example
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
+
+## 5. Configuração do ambiente
+
+Requisitos:
+- Python 3.12.
+- Ollama instalado.
+- Modelo Qwen2.5:3b disponível no Ollama.
+
+No PowerShell, dentro da pasta do projeto:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Instale o modelo utilizado:
+
+```powershell
+ollama pull qwen2.5:3b
+```
+
+Certifique-se de que o Ollama esteja em execução antes de iniciar o sistema.
+
+## 6. Execução
+
+Coloque os documentos PDF autorizados na pasta `data/pdfs/`.
+
+Para processar os documentos e criar a base vetorial:
+
+```powershell
+python -m src.ingest
+```
+
+Para iniciar a interface de perguntas:
+
+```powershell
+python -m src.chat
+```
+
+Digite as perguntas no terminal e acompanhe as respostas e os trechos recuperados.
+
+## 7. Configuração dos chunks
+
+A configuração principal utiliza:
+
+- Tamanho do chunk: 1200 caracteres.
+- Sobreposição: 200 caracteres.
+
+O projeto também possui uma configuração experimental definida para comparação:
+
+- Tamanho do chunk: 500 caracteres.
+- Sobreposição: 80 caracteres.
+
+A comparação entre configurações deverá considerar a qualidade da recuperação e a fidelidade das respostas.
+
+## 8. Avaliação
+
+A avaliação do sistema deverá utilizar entre 20 e 30 perguntas relacionadas aos documentos da base de conhecimento.
+
+Os testes devem incluir:
+
+- Perguntas com respostas explícitas nos documentos.
+- Perguntas que exigem relacionar informações de diferentes artigos.
+- Perguntas que não possuem resposta nos documentos.
+- Perguntas com diferentes formas de expressar a mesma dúvida.
+
+Critérios de avaliação:
+
+1. Recuperação do trecho correto.
+2. Fidelidade da resposta ao documento.
+3. Identificação correta dos artigos e páginas.
+4. Capacidade de reconhecer quando não há informação suficiente.
+
+Também será realizada a comparação entre pelo menos duas configurações de chunking.
+
+## 9. Documentos utilizados
+
+O sistema utiliza documentos institucionais em PDF como fonte de conhecimento.
+
+O documento deve ser público ou possuir autorização para utilização. As respostas devem respeitar o conteúdo original, sem inventar regras ou informações acadêmicas.
+
+As informações bibliográficas, a instituição responsável, a origem e a data de acesso dos documentos devem ser registradas no relatório do projeto.
+
+## 10. Observações
+
+- O modelo de linguagem é executado localmente por meio do Ollama.
+- Não é necessária uma chave de API para utilizar o modelo configurado.
+- O banco vetorial é persistido localmente na pasta `chroma_db`.
+- Os documentos utilizados como fonte devem estar disponíveis na pasta `data/pdfs/`.
+- O projeto tem finalidade acadêmica e utiliza recuperação de informações para fundamentar as respostas.
+===== REQUIREMENTS =====
+langchain
+langchain-community
+langchain-chroma
+langchain-text-splitters
+langchain-huggingface
+sentence-transformers
+pypdf
+python-dotenv
+===== PDFs DA BASE =====
+@{Name=COLOQUE_OS_PDFS_AQUI.txt; Length=201}
+@{Name=regulamento_geral_fatecs.pdf; Length=333811}

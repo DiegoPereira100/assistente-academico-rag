@@ -1,0 +1,11 @@
+langchain
+langchain-community
+langchain-chroma
+langchain-text-splitters
+langchain-huggingface
+sentence-transformers
+pypdf
+python-dotenv
+
+langchain-ollama==1.1.0
+rank-bm25==0.2.2

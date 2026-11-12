@@ -1,0 +1,10 @@
+﻿@(
+    "===== CONFIG.PY ====="
+    Get-Content .\src\config.py
+    "===== INGEST.PY ====="
+    Get-Content .\src\ingest.py
+    "===== CHAT.PY ====="
+    Get-Content .\src\chat.py
+    "===== AVALIAR.PY ====="
+    Get-Content .\avaliacao\avaliar.py
+) | Set-Content .\auditoria_codigo.txt -Encoding UTF8

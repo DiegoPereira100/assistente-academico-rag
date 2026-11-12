@@ -1,0 +1,3 @@
+Adicione aqui os PDFs públicos/autorizados que servirão de base ao assistente.
+Sugestões: regulamento acadêmico, calendário letivo e manual do aluno.
+Evite dados pessoais ou documentos sigilosos.
